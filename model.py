@@ -4,13 +4,13 @@ from torch.nn import functional as F
 
 
 batch_size = 64
-block_size = 256
+block_size = 10
 max_iters = 5000
 eval_interval = 500
-learning_rate = 3e-4
+learning_rate = 5e-4
 device = "cuda" if torch.cuda.is_available() else "cpu"
 eval_iters = 200
-n_embd = 384
+n_embd = 36     
 n_head = 6
 n_layer = 6
 dropout = 0.2
@@ -111,41 +111,29 @@ class BigramLanguageModel(nn.Module):
             idx = torch.cat((idx, idx_next), dim=1) # (B, T+1)
         return idx
 
-class Head(nn.Module):
-    """ one head of self-attention """
-
-    def __init__(self, head_size):
-        super().__init__()
-        self.key = nn.Linear(n_embd, head_size, bias=False)
-        self.query = nn.Linear(n_embd, head_size, bias=False)
-        self.value = nn.Linear(n_embd, head_size, bias=False)
-        self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))
-
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, x):
-        B,T,C = x.shape
-        k = self.key(x)   # (B,T,C)
-        q = self.query(x) # (B,T,C)
-        # compute attention scores ("affinities")
-        wei = q @ k.transpose(-2,-1) * C**-0.5 # (B, T, C) @ (B, C, T) -> (B, T, T)
-        wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf')) # (B, T, T)
-        wei = F.softmax(wei, dim=-1) # (B, T, T)
-        wei = self.dropout(wei)
-        # perform the weighted aggregation of the values
-        v = self.value(x) # (B,T,C)
-        out = wei @ v # (B, T, T) @ (B, T, C) -> (B, T, C)
-        return out
-
 class MultiHeadAttention(nn.Module):
     def __init__(self, num_heads, head_size):
         super().__init__()
-        self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
-        self.proj = nn.Linear(num_heads * head_size,num_heads * head_size)
+        self.num_heads = num_heads
+        self.head_size = head_size
+
+        self.att = nn.Linear(n_embd, 3 * head_size * num_heads, bias=False)
+        self.register_buffer('tril', torch.tril(torch.ones(1,1, block_size, block_size)))
+
+        self.proj = nn.Linear(num_heads * head_size, num_heads * head_size)
         self.dropout = nn.Dropout(dropout)
     def forward(self, x):
-        out = torch.cat([h(x) for h in self.heads],dim = -1)
-        out = self.proj(out)
+        B, T, C = x.shape # (B, T, C)
+        k, q, v = self.att(x).split(n_embd,dim=2)
+        k = k.view(B,T,self.num_heads,self.head_size).transpose(1,2)  # (B, n_heads, T, head_size)
+        q = q.view(B,T,self.num_heads,self.head_size).transpose(1,2)   # (B, n_heads, T, head_size)
+        v = v.view(B, T, self.num_heads, self.head_size).transpose(1, 2)  # (B, n_heads, T, head_size)
+        wei = q @ k.transpose(2,3) * self.head_size ** -0.5 # (B, n_heads, T, T)
+        wei = wei.masked_fill(self.tril[:,:,:T,:T] == 0, float('-inf')) # (B, n_heads, T, T)
+        wei = F.softmax(wei, dim=-1)  # (B, n_heads T, T)
+        wei = self.dropout(wei)
+        out = wei @ v  # (B, n_heads, T, T) @ (B, n_heads, T, head_size) -> (B, n_heads, T, head_size)
+        out = self.proj(out.transpose(1,2).reshape(B,T,C))
         out = self.dropout(out)
         return out
 
@@ -157,7 +145,6 @@ class FeedForward(nn.Module):
             nn.ReLU(),
             nn.Linear(4 * n_embd, n_embd),
             nn.Dropout(dropout),
-
         )
 
     def forward(self, x):
